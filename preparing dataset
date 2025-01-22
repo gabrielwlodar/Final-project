@@ -1,0 +1,14 @@
+# Install PyTorch 2.0
+!pip install "torch>=2.0" --extra-index-url https://download.pytorch.org/whl/cu117 --upgrade --quiet
+# Install transformers and dataset
+!pip install "transformers==4.27.1" "datasets==2.9.0" "accelerate==0.17.1" "evaluate==0.4.0" tensorboard scikit-learn --upgrade --quiet
+# Install git-fls for pushing model and logs to the hugging face hub
+!sudo apt-get install git-lfs --yes
+!pip install --upgrade datasets fsspec
+
+dataset_split = dataset_raw.train_test_split(test_size=0.1)
+dataset_renamed = dataset_split.rename_column("lyrics_english", "text").rename_column("country", "labels").remove_columns(["year", "eurovision_number", "host_country", "lyrics", "artist", "title", "language", "host_city"]).class_encode_column("labels")
+
+print(f"Train dataset size: {len(dataset_renamed['train'])}")
+print(f"Test dataset size: {len(dataset_renamed['test'])}")
+
