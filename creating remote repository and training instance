@@ -1,0 +1,118 @@
+# Install PyTorch 2.0
+!pip install "torch>=2.0" --extra-index-url https://download.pytorch.org/whl/cu117 --upgrade --quiet
+# Install transformers and dataset
+!pip install "transformers==4.27.1" "datasets==2.9.0" "accelerate==0.17.1" "evaluate==0.4.0" tensorboard scikit-learn --upgrade --quiet
+# Install git-fls for pushing model and logs to the hugging face hub
+!sudo apt-get install git-lfs --yes
+!pip install --upgrade datasets fsspec
+
+# Dataset id from huggingface.co/dataset
+from huggingface_hub import login
+from google.colab import userdata
+token = userdata.get('token')
+
+login(
+  token=token,
+  add_to_git_credential=True
+)
+
+from datasets import load_dataset
+
+dataset_id = "tsterbak/eurovision-lyrics-1956-2023"
+dataset_raw = load_dataset(dataset_id, split = "train")
+
+dataset_split = dataset_raw.train_test_split(test_size=0.1)
+dataset_renamed = dataset_split.rename_column("lyrics_english", "text").rename_column("country", "labels").remove_columns(["year", "eurovision_number", "host_country", "lyrics", "artist", "title", "language", "host_city"]).class_encode_column("labels")
+
+print(f"Train dataset size: {len(dataset_renamed['train'])}")
+print(f"Test dataset size: {len(dataset_renamed['test'])}")
+
+from transformers import AutoTokenizer
+
+model_id = "bert-base-uncased"
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+def tokenize(batch):
+    return tokenizer(batch['text'], padding='max_length', truncation=True, return_tensors="pt")
+
+tokenized_dataset = dataset_renamed.map(tokenize, batched=True,remove_columns=["text"])
+
+print(tokenized_dataset["train"].features.keys())
+
+from transformers import AutoModelForSequenceClassification
+
+# Model id to load the tokenizer
+model_id = "bert-base-uncased"
+
+# Prepare model labels - useful for inference
+labels = tokenized_dataset["train"].features["labels"].names
+num_labels = len(labels)
+label2id, id2label = dict(), dict()
+for i, label in enumerate(labels):
+    label2id[label] = str(i)
+    id2label[str(i)] = label
+
+# Download the model from huggingface.co/models
+model = AutoModelForSequenceClassification.from_pretrained(
+    model_id, num_labels=num_labels, label2id=label2id, id2label=id2label
+)
+
+import evaluate
+import numpy as np
+
+# Metric Id
+metric = evaluate.load("f1")
+
+# Metric helper method
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=1)
+    return metric.compute(predictions=predictions, references=labels, average="weighted")
+
+from huggingface_hub import HfFolder
+from transformers import Trainer, TrainingArguments
+
+# Id for remote repository
+repository_id = "bert-base_eurovision_lyrics_classificator_1956-2023"
+
+# Define training args
+training_args = TrainingArguments(
+    output_dir=repository_id,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=8,
+    learning_rate=5e-5,
+		num_train_epochs=3,
+		# PyTorch 2.0 specifics
+    bf16=True, # bfloat16 training
+		torch_compile=True, # optimizations
+    optim="adamw_torch_fused", # improved optimizer
+    # logging & evaluation strategies
+    logging_dir=f"{repository_id}/logs",
+    logging_strategy="steps",
+    logging_steps=200,
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    save_total_limit=2,
+    load_best_model_at_end=True,
+    metric_for_best_model="f1",
+    # push to hub parameters
+    report_to="tensorboard",
+    push_to_hub=True,
+    hub_strategy="every_save",
+    hub_model_id=repository_id,
+    hub_token=HfFolder.get_token(),
+
+)
+
+# Create a Trainer instance
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_dataset["train"],
+    eval_dataset=tokenized_dataset["test"],
+    compute_metrics=compute_metrics,
+)
+
+# Start training
+trainer.train()
